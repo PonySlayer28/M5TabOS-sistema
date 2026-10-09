@@ -90,11 +90,26 @@ lugar nenhum: o seu app mora ao lado destes.
    `/dev/ttyACM*` no Linux) e abre o monitor serial. Para escolher outra
    porta: `PORTA=/dev/xxx ./gravar.sh`.
 
-### Firmware do ESP32-C6 (ESP-NOW e Bluetooth)
+### Firmware do ESP32-C6 (opcional)
 
-O Tab5 sai de fábrica com um firmware de Wi-Fi no C6. O Wi-Fi funciona com
-ele, em modo compatível. **ESP-NOW e Bluetooth precisam do firmware da pasta
-`c6/`**, que é da mesma versão do esp_hosted do sistema (3.0.9).
+**O sistema funciona com o rádio de fábrica, sem atualizar nada.** Wi-Fi,
+internet, Meshtastic pelo cabo Grove ou pela internet e todos os apps rodam
+direto. A atualização do C6 só acrescenta três coisas:
+
+| Recurso | Rádio de fábrica | Rádio atualizado |
+|---|---|---|
+| Wi-Fi e internet | sim | sim |
+| Meshtastic pelo Grove ou pela internet | sim | sim |
+| ESP-NOW | não | sim |
+| Bluetooth (e Meshtastic por Bluetooth) | não | sim |
+| Farejo e CSI do rádio | não | sim |
+
+Sem a atualização, as telas dessas funções dizem "rádio C6 de fábrica:
+atualização opcional", e o resto segue normal.
+
+Para quem quiser os três recursos: o firmware fica na pasta `c6/` (mesma
+versão do esp_hosted do sistema, 3.0.9) e precisa de um gravador serial,
+porque o C6 não tem USB próprio.
 
 O C6 não tem USB próprio. É gravado pelo conector de programação da placa,
 com um gravador serial (por exemplo, o M5Stack ESP32 Downloader):

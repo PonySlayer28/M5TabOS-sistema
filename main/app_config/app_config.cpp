@@ -373,6 +373,10 @@ static void est_bt(char* o, size_t t)
   const tab5_ble_estado_t e = tab5_ble_estado();
   if (e == TAB5_BLE_PRONTO)       { snprintf(o, t, "Ligado"); }
   else if (e == TAB5_BLE_SUBINDO) { snprintf(o, t, "Ligando..."); }
+  // C6 com o firmware de fabrica (Wi-Fi funciona, Bluetooth nao): nao e
+  // defeito, e uma atualizacao opcional - o texto tem que dizer isso.
+  else if (e == TAB5_BLE_FALHOU && tab5_wifi_c6_enlace() && !tab5_wifi_c6_nosso())
+                                  { snprintf(o, t, "Rádio C6 de fábrica: atualização opcional"); }
   else if (e == TAB5_BLE_FALHOU)  { snprintf(o, t, "Falhou - o C6 não deu o Bluetooth"); }
   else if (e == TAB5_BLE_DESLIGANDO) { snprintf(o, t, "Desligando..."); }
   else                            { snprintf(o, t, "Desligado"); }
@@ -380,7 +384,12 @@ static void est_bt(char* o, size_t t)
 
 static void est_espnow(char* o, size_t t)
 {
-  if (!tab5_espnow_c6_compativel()) { snprintf(o, t, "Precisa do firmware nosso no C6"); return; }
+  if (!tab5_espnow_c6_compativel()) {
+    // Sem enlace ainda nao da para saber qual firmware o C6 tem.
+    snprintf(o, t, tab5_wifi_c6_enlace() ? "Rádio C6 de fábrica: atualização opcional"
+                                         : "Ligue o Wi-Fi");
+    return;
+  }
   const uint8_t f = tab5_espnow_canal_fixo();
   if (f) { snprintf(o, t, "Canal fixo %u (sem roteador)", (unsigned)f); }
   else   { snprintf(o, t, "Canal do roteador (%u)", (unsigned)tab5_espnow_canal()); }

@@ -219,7 +219,7 @@ static void v_wifi(char* o, size_t n)
 // ---- ESP-NOW ----------------------------------------------------------------
 static void v_espnow(char* o, size_t n)
 {
-  if (!tab5_espnow_pronto()) { snprintf(o, n, "fora do ar (precisa do firmware nosso no C6)"); return; }
+  if (!tab5_espnow_pronto()) { snprintf(o, n, "fora do ar (radio C6 de fabrica ou Wi-Fi desligado)"); return; }
   const int k = tab5_espnow_n();
   espnow_msg_t m;
   if (k > 0 && tab5_espnow_msg(k - 1, &m)) { snprintf(o, n, "canal %u, ultima: %.28s", tab5_espnow_canal(), m.texto); }

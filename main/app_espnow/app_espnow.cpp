@@ -98,7 +98,7 @@ static int estado_agora(void)
 static const char* motivo(int est)
 {
   switch (est) {
-    case 0:  return "C6 sem o firmware com ESP-NOW - só consulta";
+    case 0:  return "rádio C6 de fábrica: ESP-NOW pede atualização (opcional)";
     case 1:  return "ligue o Wi-Fi em Ajustes (o C6 só tem energia com ele)";
     case 2:  return "ligando o ESP-NOW...";
     case 4:  return "rádio parado - ligue o Wi-Fi ou fixe um canal em Ajustes";
