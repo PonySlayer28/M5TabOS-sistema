@@ -1,0 +1,306 @@
+#include "tab5_gps.hpp"
+#include "tab5_mutex.hpp"
+#include "tab5_donos.hpp"
+#include "pool_tarefas.h"
+#include "parada.hpp"      // parada cooperativa da tarefa (kernel)
+#include "tab5_grove.hpp"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/uart.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "tab5_hora.hpp"   // tab5_agora_ms
+#include <string.h>
+
+static const char* TAG = "gps";
+
+// ---- fiacao do GPS no Grove (Port A do Tab5) -------------------------------
+// MOVIDA de app_azimutal.cpp - o modulo e o mesmo, so quem liga
+// a UART mudou de "o app, ao abrir" para "o servico, quando o Grove tem um
+// GPS de verdade".
+static const uart_port_t GPS_UART   = UART_NUM_1;
+static const int         GPS_RX_PIN = 54;   // GPIO54 = SCL do Port A, recebe o TX do GPS
+static const int         GPS_TX_PIN = 53;   // GPIO53 = SDA do Port A
+static const int         GPS_BAUD   = 9600;
+
+static bool     s_servico_ativo = false;
+static parada_t s_parada = { };   // pedido de parada e confirmacao de saida da tarefa
+
+static nmea_posicao_t s_pos   = { };
+static nmea_tempo_t   s_tempo = { };
+static uint32_t       s_ultima_sentenca_ms = 0;
+static uint32_t       s_iniciado_em_ms     = 0;   // ver o aviso em tab5_gps_silencio_ms()
+
+static QueueHandle_t s_assinante = nullptr;   // quem quiser sentenca crua (Azimutal)
+
+// TRAVA PARA s_pos/s_tempo - achado ao revisar "pronto para
+// mais de um consumidor ao mesmo tempo": tab5_gps_posicao()/tab5_gps_tempo()
+// ja SAO documentadas (ver o .hpp) como "qualquer app pode perguntar onde
+// estou", mas devolviam o struct inteiro (dois double, dois float, flags -
+// nao cabe numa instrucao so) sem nenhuma protecao contra a tarefa do GPS
+// escrever no meio da copia. Com UM leitor de cada vez isso quase nunca se
+// nota (a posicao fica errada por um frame so); a intencao declarada e
+// varios apps lendo ao mesmo tempo, e ai a chance de pegar um valor
+// "rasgado" (latitude nova com longitude velha) sobe. Lazy-create e nunca
+// destruida, MESMO MOLDE de services/notificacao.cpp - o primeiro uso e
+// sempre antes de qualquer disputa de verdade (o boot chama tab5_gps_iniciar
+// antes de qualquer app poder ler), entao criar aqui e seguro.
+static SemaphoreHandle_t s_trava = nullptr;
+
+
+static inline void travar(void)
+{
+  tab5_mutex_travar(&s_trava);   // criado sem corrida na primeira vez
+}
+static inline void destravar(void) { if (s_trava) { xSemaphoreGive(s_trava); } }
+
+nmea_posicao_t tab5_gps_posicao(void)
+{
+  travar();
+  nmea_posicao_t copia = s_pos;
+  destravar();
+  return copia;
+}
+
+nmea_tempo_t tab5_gps_tempo(void)
+{
+  travar();
+  nmea_tempo_t copia = s_tempo;
+  destravar();
+  return copia;
+}
+
+bool tab5_gps_servico_ativo(void) { return s_servico_ativo; }
+
+bool tab5_gps_no_ar(void)
+{
+  return s_ultima_sentenca_ms != 0 && (tab5_agora_ms() - s_ultima_sentenca_ms) < 15000;
+}
+
+uint32_t tab5_gps_silencio_ms(void)
+{
+  if (s_ultima_sentenca_ms == 0) {
+    // NENHUMA sentenca AINDA - mas isso pode ser porque o servico acabou de
+    // subir agora mesmo, nao porque o modulo sumiu. Bug visto em hardware
+    // devolver UINT32_MAX aqui incondicionalmente faz a vigia
+    // do Grove (kernel/core.cpp, "GPS mudo ha Xs") disparar no PRIMEIRO tique
+    // (ate 2s) depois de QUALQUER reinicio - antes do modulo sequer ter
+    // tido a CHANCE de falar dentro do prazo de 5s que o codigo achava que
+    // estava dando. Resultado: servico sobe, e derrubado 2s depois por
+    // "mudo", sobe nvo, e derrubado de novo - um loop sem fim, nunca da
+    // tempo real para o GPS responder.
+    //
+    // A conta certa e a partir de QUANDO O SERVICO SUBIU, nao um valor
+    // sentinela fixo - assim o chamador (a vigia) ve o silencio crescendo
+    // de verdade e so desconfia depois do prazo INTEIRO ter passado, igual
+    // ja acontece quando ele fala e depois some.
+    return s_servico_ativo ? (tab5_agora_ms() - s_iniciado_em_ms) : UINT32_MAX;
+  }
+  return tab5_agora_ms() - s_ultima_sentenca_ms;
+}
+
+bool tab5_gps_assinar(QueueHandle_t fila)
+{
+  if (s_assinante != nullptr) { return false; }   // um assinante so, ver o header
+  s_assinante = fila;
+  return true;
+}
+
+void tab5_gps_dessinscrever(void) { s_assinante = nullptr; }
+
+// ---------------------------------------------------------------------------
+// A TAREFA - le bytes da UART, monta sentencas, parseia RMC/GGA e repassa a
+// sentenca crua para quem assinou. E a MESMA maquina de estados por
+// caractere que o app_azimutal usava (laco_gps + o dispatch do laco_parser),
+// so que agora e um loop so: nao ha mais uma queue entre "ler" e "parsear"
+// porque e a MESMA tarefa que faz as duas coisas.
+// A TAREFA DORME NA FILA DE EVENTOS DA UART, nao num prazo curto. Era
+// uart_read_bytes com 50 ms: 20 despertares por segundo para um modulo que
+// manda uma rajada por segundo a 9600 baud. O driver avisa (UART_DATA) quando
+// o FIFO enche ou a linha fica quieta - poucos avisos por rajada - e a tarefa
+// le tudo o que ja chegou de uma vez. Para parar, o tab5_gps_parar cutuca a
+// fila (gps_cutucar) e a tarefa ve o pedido na hora.
+static QueueHandle_t s_uart_ev = nullptr;   // criada pelo driver da UART
+
+static void gps_cutucar(void)
+{
+  if (!s_uart_ev) { return; }
+  uart_event_t e = { };
+  e.type = UART_EVENT_MAX;   // nao e evento do driver: so acorda a tarefa
+  xQueueSend(s_uart_ev, &e, 0);
+}
+
+static void vTaskGPS_corpo(void*)
+{
+  char buffer[NMEA_MAX_LENGTH];
+  int  idx = 0;
+  bool gravando = false;
+
+  static uint8_t entrada[256];   // leitura em bloco - ver o comentario que
+                                  // existia em laco_gps sobre o custo por byte
+
+  while (!parada_pedida(&s_parada)) {
+    uart_event_t ev;
+    if (xQueueReceive(s_uart_ev, &ev, pdMS_TO_TICKS(1000)) != pdTRUE) { continue; }
+    if (ev.type == UART_FIFO_OVF || ev.type == UART_BUFFER_FULL) {
+      // Ninguem leu a tempo: o que esta no buffer e uma sentenca cortada.
+      uart_flush_input(GPS_UART);
+      xQueueReset(s_uart_ev);
+      gravando = false; idx = 0;
+      continue;
+    }
+    if (ev.type != UART_DATA) { continue; }   // o cutucao da parada, ou outro aviso
+    int lidos;
+    while ((lidos = uart_read_bytes(GPS_UART, entrada, sizeof(entrada), 0)) > 0) {   // tudo o que ja chegou
+      for (int k = 0; k < lidos; ++k) {
+        const char c = (char)entrada[k];
+
+        if (c == '$') {
+          gravando = true;
+          idx = 0;
+          buffer[idx++] = c;
+          continue;
+        }
+        if (!gravando) { continue; }
+        if (idx >= NMEA_MAX_LENGTH - 1) { gravando = false; idx = 0; continue; }
+
+        buffer[idx++] = c;
+
+        if (c == '\n') {
+          buffer[idx] = '\0';
+          gravando = false;
+          idx = 0;
+
+          if (!nmea_checksum_ok(buffer)) {
+            ESP_LOGD(TAG, "checksum invalido: %s", buffer);
+            continue;
+          }
+
+          s_ultima_sentenca_ms = tab5_agora_ms();
+
+          // Os 2 primeiros caracteres depois do '$' mudam por constelacao
+          // (GP=GPS, GL=GLONASS...); por isso comparamos a partir do 3o.
+          if (strncmp(buffer + 3, "RMC", 3) == 0) {
+            nmea_tempo_t t;
+            if (nmea_parse_rmc(buffer, &t)) { travar(); s_tempo = t; destravar(); }
+          } else if (strncmp(buffer + 3, "GGA", 3) == 0) {
+            nmea_posicao_t p;
+            if (nmea_parse_gga(buffer, &p)) { travar(); s_pos = p; destravar(); }
+          }
+
+          // TODA sentenca valida vai para quem assinou, inclusive RMC/GGA que
+          // acabamos de processar - o Azimutal filtra GSV sozinho, como sempre
+          // fez; nao vale a pena este servico saber o que cada assinante quer.
+          if (s_assinante) {
+            NMEARawSentence_t crua;
+            strncpy(crua.sentence, buffer, NMEA_MAX_LENGTH - 1);
+            crua.sentence[NMEA_MAX_LENGTH - 1] = '\0';
+            xQueueSend(s_assinante, &crua, 0);   // nao espera: perder 1 sentenca
+                                                  // e melhor que travar a leitura
+          }
+        }
+      }
+    }
+  }
+
+  parada_confirmar(&s_parada);
+  // Retorna: a vaga do pool devolve o dono e volta a dormir (kernel/pool_tarefas.h).
+}
+
+bool tab5_gps_parar(void)
+{
+  if (!s_servico_ativo) { return true; }
+
+  ESP_LOGI(TAG, "parando o servico...");
+  // A tarefa le a UART em fatias de 50 ms: a saida custa isso no pior caso.
+  if (!parada_pedir(&s_parada, 1000, gps_cutucar)) {
+    ESP_LOGE(TAG, "a tarefa nao confirmou em 1s - segue parando, nada foi desmontado");
+    return false;
+  }
+
+  uart_driver_delete(GPS_UART);
+  s_uart_ev = nullptr;   // a fila de eventos vai junto com o driver
+  tab5_grove_soltar(GROVE_DONO_GPS);
+
+  s_ultima_sentenca_ms = 0;
+  travar();
+  memset(&s_pos,   0, sizeof(s_pos));
+  memset(&s_tempo, 0, sizeof(s_tempo));
+  destravar();
+
+  s_servico_ativo = false;
+  ESP_LOGI(TAG, "servico parado, Grove livre");
+  return true;
+}
+
+bool tab5_gps_iniciar(void)
+{
+  if (s_servico_ativo) {
+    if (parada_em_curso(&s_parada)) {
+      ESP_LOGW(TAG, "ainda parando o servico anterior - nao vou subir por cima");
+    } else {
+      ESP_LOGI(TAG, "servico ja esta de pe - nada a fazer");
+    }
+    return true;
+  }
+
+  if (!tab5_grove_tomar(GROVE_DONO_GPS)) {
+    ESP_LOGE(TAG, "Grove ocupado - servico nao vai subir");
+    return false;
+  }
+
+  uart_config_t cfg = { };
+  cfg.baud_rate  = GPS_BAUD;
+  cfg.data_bits  = UART_DATA_8_BITS;
+  cfg.parity     = UART_PARITY_DISABLE;
+  cfg.stop_bits  = UART_STOP_BITS_1;
+  cfg.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
+  cfg.source_clk = UART_SCLK_DEFAULT;
+
+  // NAO mexa no M5.Ex_I2C aqui - ver o mesmo aviso que existia em
+  // app_azimutal.cpp: o teclado do ExtPort1 e quem usa esse barramento hoje,
+  // e soltar/reiniciar o Ex_I2C derrubaria ele.
+  if (uart_driver_install(GPS_UART, 2048, 0, 16, &s_uart_ev, 0) != ESP_OK
+   || uart_param_config(GPS_UART, &cfg) != ESP_OK
+   || uart_set_pin(GPS_UART, GPS_TX_PIN, GPS_RX_PIN,
+                   UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK)
+  {
+    ESP_LOGE(TAG, "nao consegui abrir a UART do Grove");
+    uart_driver_delete(GPS_UART);
+    s_uart_ev = nullptr;   // a fila de eventos vai junto com o driver
+    tab5_grove_soltar(GROVE_DONO_GPS);
+    return false;
+  }
+
+  travar();
+  memset(&s_pos,   0, sizeof(s_pos));
+  memset(&s_tempo, 0, sizeof(s_tempo));
+  destravar();
+  s_ultima_sentenca_ms = 0;
+
+  if (!parada_preparar(&s_parada)) {
+    uart_driver_delete(GPS_UART);
+    s_uart_ev = nullptr;   // a fila de eventos vai junto com o driver
+    tab5_grove_soltar(GROVE_DONO_GPS);
+    ESP_LOGE(TAG, "sem memoria para a tarefa do GPS");
+    return false;
+  }
+  s_iniciado_em_ms = tab5_agora_ms();   // ver o aviso em tab5_gps_silencio_ms()
+  s_servico_ativo  = true;
+
+  // Prioridade 3, mesma do servico Mesh: abaixo da interface (4), acima do
+  // registro (1) - perder byte de serial e irreversivel.
+  if (!pool_criar(nullptr, vTaskGPS_corpo, nullptr, "gps", 4096, 3, DONO_SERVICO, "GPS")) {
+    parada_desistir(&s_parada);
+    s_servico_ativo = false;
+    uart_driver_delete(GPS_UART);
+    s_uart_ev = nullptr;   // a fila de eventos vai junto com o driver
+    tab5_grove_soltar(GROVE_DONO_GPS);
+    ESP_LOGE(TAG, "sem memoria para a tarefa do GPS");
+    return false;
+  }
+  ESP_LOGI(TAG, "servico no ar (Grove %d baud, RX=%d TX=%d)",
+           GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
+  return true;
+}

@@ -1,0 +1,68 @@
+## Component Manager do IDF - equivalente ao lib_deps, mas para componentes IDF.
+##
+## VERSOES TRAVADAS (==), todas - inclusive as que vem por tabela. Qualquer
+## mudanca neste arquivo faz o gerenciador recalcular TODAS as dependencias,
+## e uma faixa aberta ("^0.2.21", "*") puxa o mais novo do registro: trocar so
+## a versao do TinyUSB trouxe junto um M5Unified novo sem ninguem pedir.
+## Atualizar um componente e decisao de proposito: troque a versao dele aqui,
+## apague build/esp-idf/<componente> (ou idf.py fullclean) e teste NO TAB5.
+## O build incremental reaproveita objetos da versao anterior: o M5Unified
+## 0.2.25 "funcionou" assim, com codigo da 0.2.21 por baixo; compilado limpo
+## ele trava no boot (M5.getIOExpander(0) vazio em tab5_power_camera).
+dependencies:
+  idf:
+    version: ">=5.5"
+  m5stack/m5unified:
+    version: "==0.2.21"
+  ## O m5gfx vem pela M5Unified (que pede ">=0.2.28"); travado aqui.
+  m5stack/m5gfx:
+    version: "==0.2.32"
+  ## WiFi. No P4 nao ha radio no chip: o esp_wifi do IDF so entrega os
+  ## cabecalhos, e a implementacao real vem daqui - que por sua vez puxa o
+  ## esp_hosted, o transporte SDIO ate o ESP32-C6 ao lado.
+  espressif/esp_wifi_remote:
+    version: "==1.6.4"
+  ## O transporte ate o C6 e a ponte por tras do esp_wifi_remote - travados
+  ## junto: o firmware do C6 tem que falar a mesma versao do esp_hosted.
+  espressif/esp_hosted:
+    version: "==3.0.9"
+  espressif/esp_serial_slave_link:
+    version: "==1.1.2"
+  espressif/eppp_link:
+    version: "==1.1.6"
+  espressif/wifi_remote_over_eppp:
+    version: "==0.3.3"
+  ## CAMERA. O sensor do Tab5 (SC2356/SC202CS) fala MIPI-CSI, nao
+  ## a DVP antiga do esp32-camera classico - por isso o par certo e este, o
+  ## subsistema novo da Espressif (V4L2-like: open()/ioctl()/mmap() em
+  ## /dev/videoN) por cima do driver do sensor. esp_cam_sensor entrega o
+  ## driver do SC2356 em si (Kconfig CONFIG_CAMERA_SC202CS, ligado no
+  ## sdkconfig); esp_video entrega o pipeline (CSI + ISP) e o /dev/videoN.
+  espressif/esp_cam_sensor:
+    version: "==2.0.1"
+  espressif/esp_video:
+    version: "==2.0.1"
+  ## Por tabela, da camera/video.
+  espressif/esp_sccb_intf:
+    version: "==0.0.9"
+  espressif/esp_ipa:
+    version: "==1.3.1"
+  espressif/esp_h264:
+    version: "==1.0.4"
+  espressif/usb_host_uvc:
+    version: "==2.4.2"
+  espressif/cmake_utilities:
+    version: "==0.5.3"
+  ## MODO PENDRIVE (services/tab5_pendrive). O TinyUSB cru, sem o
+  ## esp_tinyusb por cima: o esp_tinyusb monta o PHY do jeito padrao, e o
+  ## USB-C do Tab5 precisa do PHY full speed TROCADO com o do console (ver
+  ## tab5_pendrive.hpp). A configuracao e main/tusb_config.h.
+  ## 0.21 e nao 0.19: o driver DWC2 da 0.19, no modo DMA, so guarda UM pacote
+  ## SETUP no EP0 (a 0.21 guarda tres e reescreveu o caminho), trata as
+  ## interrupcoes de saida antes das de entrada, e o MSC rearma o proximo
+  ## comando mesmo com o endpoint de saida travado. (O sintoma que motivou a
+  ## troca - o computador "parando" depois do INQUIRY - era outro: o bip do
+  ## alto-falante desligando o pad do OTG, ver sistema_som_ceder_pinos. A 0.21
+  ## ficou: testada com leitura e escrita de dezenas de MB, hash conferido.)
+  espressif/tinyusb:
+    version: "~0.21.0"

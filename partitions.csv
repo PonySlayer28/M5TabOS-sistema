@@ -1,0 +1,38 @@
+# Tabela de particoes do M5tabOS.
+#
+# Saiu da "singleapp_large" do IDF (1500K de app) porque ela ja estava em 68% e
+# o chip do Tab5 tem 16MB - estavamos apertados numa fatia que usava 9% da
+# flash.
+#
+# CRESCEU DE 2MB PARA 4MB, para caber a tabela de 1391 emoji
+# (~1,5MB de bitmap, ver tab5_emoji_dados.cpp) com folga de sobra. O chip tem
+# 16MB; mesmo com 4MB de app, sobram 12MB sem ninguem em cima - nao e motivo
+# para ficar espremendo bitmap.
+#
+# nvs E phy_init FICAM NO MESMO LUGAR, DE PROPOSITO.
+#
+# A NVS guarda as preferencias do usuario: brilho, WiFi, teclado, Grove. Mudar
+# o offset dela apagaria tudo isso na primeira gravacao - o aparelho voltaria
+# ao brilho padrao e esqueceria a rede. Como so a particao do app cresce, e
+# ela vem DEPOIS das duas, os ajustes atravessam a mudanca intactos - inclusive
+# esta, de 2 para 4MB.
+#
+# O 0x400000 (4096K) e redondo de proposito: particao de app quer offset
+# alinhado em 64K, e deixar o tamanho alinhado tambem evita surpresa no dia em
+# que alguem acrescentar uma particao depois desta.
+#
+# CRESCEU DE 4MB PARA 8MB, para as fontes suaves (Roboto em
+# ~20 alturas nativas, regular e negrito, ~2,4MB - ver gerar_fontes.py). Mesma
+# regra: nvs e phy_init nao se mexem, so o app cresce.
+#
+# RESERVA (2 MB, depois do app): o diario das gravacoes feitas enquanto o
+# cartao esta emprestado ao computador (modo pendrive) - ver
+# hal/tab5_reserva.hpp. Fica vazia quase sempre. Mesma regra de sempre: entra
+# DEPOIS das outras, nvs e phy_init nao se mexem, os ajustes continuam. Sobram
+# ~5,9 MB livres no fim da flash.
+#
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   24K,
+phy_init,   data, phy,     0xf000,   4K,
+factory,    app,  factory, 0x10000,  0x800000,
+reserva,    data, 0x99,    0x810000, 0x200000,

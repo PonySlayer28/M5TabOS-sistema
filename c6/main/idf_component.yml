@@ -1,0 +1,16 @@
+dependencies:
+  # override_path aponta para a COPIA QUE JA ESTA NO PROJETO. Duas razoes:
+  # compila sem rede, e garante que o coprocessador e o host falem exatamente a
+  # mesma versao do esp_hosted - descasamento de versao entre os dois lados e o
+  # defeito que a gente esta justamente tentando corrigir.
+  espressif/esp_hosted:
+    version: '*'
+    override_path: '../../managed_components/espressif__esp_hosted'
+  idf:
+    version: '>=5.5'
+  # O ESP-NOW DO CARDPUTER OFICIAL: o chat do M5Cardputer-UserDemo
+  # usa o componente esp-now da Espressif, que poe um cabecalho proprio antes do
+  # texto (tipo, tamanho, marca anti-repeticao) e retransmite. Mesma biblioteca,
+  # mesma versao = mesmo formato no ar, por construcao.
+  espressif/esp-now:
+    version: '2.5.3'   # formato no ar identico ao 2.5.1 do Cardputer (dito no proprio codigo da Espressif); 2.5.1 nao compila no IDF 5.5

@@ -1,0 +1,93 @@
+# ESTATICOS DOS APPS E SERVICOS NA PSRAM, SEM TOCAR NOS ARQUIVOS.
+#
+# O .bss de cada arquivo desta lista (variaveis static e globais sem valor
+# inicial) sai da SRAM interna e vai para a secao .ext_ram.bss, na PSRAM. E o
+# mesmo efeito de marcar cada variavel com EXT_RAM_BSS_ATTR, so que por arquivo
+# inteiro: um vetor novo que alguem acrescente num app ja nasce no lugar certo.
+#
+# POR QUE ISSO IMPORTA. A SRAM interna do P4 e ~320 KB de heap e e dela que
+# saem as pilhas de TODAS as tarefas, as filas do FreeRTOS, os buffers DMA do
+# SDIO do C6 e os do painel. Cada KB de .bss interno e um KB a menos para isso,
+# para sempre - inclusive os buffers de um app que esta fechado. Aqui estavam
+# ~75 KB nessa situacao (historico do monitor, pontos do mapa da Trilha, alvos
+# do Radar, quadros do MQTT...).
+#
+# REGRA PARA ENTRAR NA LISTA. O arquivo nao pode ter NENHUMA variavel que seja
+#   - lida ou escrita dentro de ISR (IRAM_ATTR): durante escrita na flash o
+#     cache fica desligado e a PSRAM some; uma ISR que tocasse nela travaria;
+#   - buffer de DMA: a linha de cache L2 e de 128 B e o DMA exige alinhamento
+#     a ela na PSRAM (ver a piscada azul);
+#   - portMUX / StaticSemaphore_t / StaticTask_t / pilha de tarefa: travas e
+#     pilhas ficam na interna.
+# Conferido arquivo por arquivo. FICAM DE FORA, de proposito: pool_tarefas
+# (pilhas), tab5_marcos (DRAM_ATTR, lido com o cache desligado), tab5_tela e
+# tab5_quadro (ISR do DSI), tab5_camera (ISR), core (ISR do toque), tab5_power,
+# tab5_sd, tab5_log, tab5_donos e fundo (portMUX), e o app_cobra, que nao e
+# mexido daqui.
+#
+# PARA CONFERIR depois de compilar: o arquivo sai da lista de DIRAM do
+#   idf.py size-files
+# e passa a aparecer em "External RAM".
+
+# O esquema "extram_bss" do IDF mora no esp_wifi/linker.lf, que NAO entra no
+# build do P4 (o WiFi roda no C6, o esp_wifi daqui nao compila). Sem ele o
+# mapeamento abaixo nao casava com nada e o ldgen ficava calado - o .bss
+# continuava na interna. Por isso o esquema e declarado aqui, igual ao dele:
+# as secoes .bss e COMMON do arquivo vao para o alvo extern_ram do sections.ld.
+[scheme:m5tabos_extram_bss]
+entries:
+  bss -> extern_ram
+  common -> extern_ram
+
+[mapping:m5tabos_extram_bss]
+archive: libmain.a
+entries:
+  if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+    # apps (so a tarefa de interface e a vaga do proprio app tocam nisto)
+    app_arquivos (m5tabos_extram_bss)
+    app_azimutal (m5tabos_extram_bss)
+    app_config (m5tabos_extram_bss)
+    app_energia (m5tabos_extram_bss)
+    app_espnow (m5tabos_extram_bss)
+    app_exemplo (m5tabos_extram_bss)
+    app_imu (m5tabos_extram_bss)
+    app_mesh (m5tabos_extram_bss)
+    app_radar (m5tabos_extram_bss)
+    app_tarefas (m5tabos_extram_bss)
+    app_trilha (m5tabos_extram_bss)
+    trilha_fundo (m5tabos_extram_bss)
+    # servicos (tarefas proprias, nenhuma ISR)
+    tab5_monitor (m5tabos_extram_bss)
+    tab5_mesh (m5tabos_extram_bss)
+    tab5_mesh_mqtt (m5tabos_extram_bss)
+    tab5_mesh_ble (m5tabos_extram_bss)
+    tab5_espnow (m5tabos_extram_bss)
+    tab5_wifi (m5tabos_extram_bss)
+    tab5_ble (m5tabos_extram_bss)
+    tab5_gps (m5tabos_extram_bss)
+    tab5_grove (m5tabos_extram_bss)
+    nmea (m5tabos_extram_bss)
+    # IPA da camera (tarefa do ISP e console). O portMUX dele tem valor
+    # inicial diferente de zero: vai para .data, que fica na interna.
+    tab5_camera_ipa (m5tabos_extram_bss)
+    registro (m5tabos_extram_bss)
+    notificacao (m5tabos_extram_bss)
+    # interface (tabelas de fonte e medidas de texto)
+    tab5_ui (m5tabos_extram_bss)
+    conversa (m5tabos_extram_bss)
+    # animacoes do bloqueio (so a tarefa de interface desenha; sem ISR nem DMA)
+    bloqueio_anim (m5tabos_extram_bss)
+    # console (tarefa propria, nenhuma ISR). Ele grava na NVS, mas isso so
+    # proibe PILHA na PSRAM, nao .bss: a escrita na flash copia o que vem da
+    # PSRAM por um buffer interno.
+    console (m5tabos_extram_bss)
+
+# O lwIP do IDF pede o mesmo (lwip/linker.lf: "* (extram_bss)" quando o .bss
+# pode ir para a PSRAM) e caia no mesmo buraco do esquema ausente. O IDF ja
+# considera o .bss do lwIP seguro fora da interna; aqui so se cumpre o que ele
+# pretendia.
+[mapping:m5tabos_lwip_extram_bss]
+archive: liblwip.a
+entries:
+  if SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
+    * (m5tabos_extram_bss)
